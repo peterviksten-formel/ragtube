@@ -118,6 +118,8 @@ async def upload_to_cloudinary(media_url: str) -> dict[str, Any] | None:
             data={
                 "file": media_url,
                 "upload_preset": CLOUDINARY_UPLOAD_PRESET,
+                "folder": "ragtube/inspiration",
+                "tags": "ragtube",
             },
         )
         if response.status_code >= 400:
