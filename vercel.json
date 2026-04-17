@@ -1,0 +1,11 @@
+{
+  "functions": {
+    "api/telegram-webhook.py": {
+      "memory": 1024,
+      "maxDuration": 300
+    }
+  },
+  "rewrites": [
+    { "source": "/api/telegram-webhook", "destination": "/api/telegram-webhook" }
+  ]
+}
