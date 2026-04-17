@@ -11,7 +11,6 @@ Vercel kills background tasks once the response is returned.
 
 from __future__ import annotations
 
-import asyncio
 import os
 import re
 from typing import Any
@@ -21,7 +20,6 @@ import httpx
 from apify_client import ApifyClientAsync
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from youtube_transcript_api import YouTubeTranscriptApi
 
 # -------------------------------------------------------------------
 # Environment
@@ -44,6 +42,9 @@ RAG_ANYTHING_API_KEY = _env("RAG_ANYTHING_API_KEY", "")
 # Browse https://apify.com/store to pick one that matches your pricing / quality needs.
 APIFY_INSTAGRAM_ACTOR = "apify/instagram-scraper"
 APIFY_TIKTOK_ACTOR = "clockworks/tiktok-scraper"
+# YouTube actor — switched off youtube-transcript-api because it gets blocked
+# from Vercel's datacenter IPs. Apify runs from residential IPs YouTube accepts.
+APIFY_YOUTUBE_ACTOR = "pintostudio/youtube-transcript-scraper"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})")
@@ -102,22 +103,32 @@ async def send_telegram_message(chat_id: int, text: str) -> None:
 # Extraction modules
 # -------------------------------------------------------------------
 async def extract_youtube(url: str) -> dict[str, Any]:
-    match = YT_ID_RE.search(url)
-    if not match:
-        raise ValueError("Could not find a YouTube video ID in the URL.")
-    video_id = match.group(1)
+    # Actor input/output schemas vary — check the actor's README on apify.com if
+    # the parsing below drops to empty.
+    items = await _run_apify_actor(APIFY_YOUTUBE_ACTOR, {"videoUrls": [url]})
+    if not items:
+        raise RuntimeError("YouTube actor returned zero items (no transcript available?).")
+    item = items[0]
 
-    # youtube-transcript-api is sync; run in a thread to avoid blocking the loop.
-    def _fetch() -> list[dict[str, Any]]:
-        return YouTubeTranscriptApi.get_transcript(video_id, languages=["en", "sv", "de", "fr", "es"])
-
-    segments = await asyncio.to_thread(_fetch)
-    transcript = " ".join(seg["text"].strip() for seg in segments if seg.get("text"))
+    transcript_raw = (
+        item.get("transcript")
+        or item.get("captions")
+        or item.get("text")
+        or item.get("data")
+        or ""
+    )
+    if isinstance(transcript_raw, list):
+        transcript = " ".join(
+            (seg.get("text") if isinstance(seg, dict) else str(seg)) or ""
+            for seg in transcript_raw
+        ).strip()
+    else:
+        transcript = str(transcript_raw).strip()
 
     return {
         "platform": "youtube",
-        "title": None,
-        "author": None,
+        "title": item.get("title") or item.get("videoTitle"),
+        "author": item.get("channelName") or item.get("author"),
         "media_urls": [],
         "body": transcript,
     }
