@@ -11,6 +11,7 @@ Vercel kills background tasks once the response is returned.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 from typing import Any
@@ -245,21 +246,39 @@ async def extract_instagram(url: str) -> dict[str, Any]:
     caption = post.get("caption") or ""
     author = post.get("ownerUsername") or post.get("owner", {}).get("username")
 
-    # Reels have a videoUrl + a displayUrl thumbnail; still images have only displayUrl.
-    # VLM describes the still frame, so displayUrl is what we want either way.
-    stable_url, public_id, description = await enrich_with_image(post.get("displayUrl"))
+    # Carousels expose every slide under childPosts; single posts/reels fall back
+    # to displayUrl. Each entry contributes one still frame for VLM description.
+    source_urls: list[str] = []
+    for child in post.get("childPosts") or []:
+        child_url = child.get("displayUrl")
+        if child_url:
+            source_urls.append(child_url)
+    if not source_urls:
+        if isinstance(post.get("images"), list):
+            source_urls = [u for u in post["images"] if u]
+        elif post.get("displayUrl"):
+            source_urls = [post["displayUrl"]]
+
+    # Upload + describe all slides in parallel.
+    enrichments = await asyncio.gather(*[enrich_with_image(u) for u in source_urls])
+    stable_urls = [e[0] for e in enrichments if e[0]]
+    public_ids = [e[1] for e in enrichments if e[1]]
+    descriptions = [e[2] for e in enrichments if e[2]]
 
     body_parts = [caption] if caption else []
-    if description:
-        body_parts.append(f"**Visual description:** {description}")
+    if len(descriptions) == 1:
+        body_parts.append(f"**Visual description:** {descriptions[0]}")
+    elif len(descriptions) > 1:
+        for i, desc in enumerate(descriptions, start=1):
+            body_parts.append(f"**Slide {i}:** {desc}")
     body = "\n\n".join(body_parts)
 
     return {
         "platform": "instagram",
         "title": None,
         "author": author,
-        "media_urls": [stable_url] if stable_url else [],
-        "public_id": public_id,
+        "media_urls": stable_urls,
+        "public_ids": public_ids,
         "body": body,
     }
 
@@ -293,7 +312,7 @@ async def extract_tiktok(url: str) -> dict[str, Any]:
         "title": None,
         "author": author,
         "media_urls": [stable_url] if stable_url else [],
-        "public_id": public_id,
+        "public_ids": [public_id] if public_id else [],
         "body": body,
     }
 
@@ -348,7 +367,7 @@ async def push_to_rag_anything(markdown: str, url: str, extracted: dict[str, Any
             "platform": extracted.get("platform"),
             "author": extracted.get("author"),
             "media_urls": extracted.get("media_urls", []),
-            "cloudinary_public_id": extracted.get("public_id"),
+            "cloudinary_public_ids": extracted.get("public_ids") or [],
         },
     }
 
