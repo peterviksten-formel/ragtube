@@ -37,6 +37,10 @@ TELEGRAM_WEBHOOK_SECRET = _env("TELEGRAM_WEBHOOK_SECRET")
 APIFY_API_TOKEN = _env("APIFY_API_TOKEN")
 RAG_ANYTHING_API_URL = _env("RAG_ANYTHING_API_URL")
 RAG_ANYTHING_API_KEY = _env("RAG_ANYTHING_API_KEY", "")
+CLOUDINARY_CLOUD_NAME = _env("CLOUDINARY_CLOUD_NAME", "")
+CLOUDINARY_UPLOAD_PRESET = _env("CLOUDINARY_UPLOAD_PRESET", "")
+OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
+IMAGE_DESCRIPTION_PROMPT = _env("IMAGE_DESCRIPTION_PROMPT", "")
 
 # Swap these for the specific Apify actor IDs you want to use.
 # Browse https://apify.com/store to pick one that matches your pricing / quality needs.
@@ -97,6 +101,73 @@ async def send_telegram_message(chat_id: int, text: str) -> None:
             f"{TELEGRAM_API}/sendMessage",
             json={"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
         )
+
+
+# -------------------------------------------------------------------
+# Image helpers: stable storage + vision-model description
+# -------------------------------------------------------------------
+async def upload_to_cloudinary(media_url: str) -> dict[str, Any] | None:
+    """Fetch a transient media URL and re-host it on Cloudinary. Returns the
+    JSON response, or None if Cloudinary isn't configured or the upload fails."""
+    if not CLOUDINARY_CLOUD_NAME or not CLOUDINARY_UPLOAD_PRESET:
+        return None
+    endpoint = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload"
+    async with httpx.AsyncClient(timeout=60) as client:
+        response = await client.post(
+            endpoint,
+            data={
+                "file": media_url,
+                "upload_preset": CLOUDINARY_UPLOAD_PRESET,
+            },
+        )
+        if response.status_code >= 400:
+            return None
+        return response.json()
+
+
+async def describe_image(image_url: str) -> str:
+    """Call OpenAI's vision model with the configured prompt. Returns the
+    description, or an empty string if the model isn't configured or fails."""
+    if not OPENAI_API_KEY or not IMAGE_DESCRIPTION_PROMPT:
+        return ""
+    async with httpx.AsyncClient(timeout=90) as client:
+        response = await client.post(
+            "https://api.openai.com/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {OPENAI_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [
+                    {"role": "system", "content": IMAGE_DESCRIPTION_PROMPT},
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_url}},
+                        ],
+                    },
+                ],
+                "max_tokens": 500,
+            },
+        )
+        if response.status_code >= 400:
+            return ""
+        data = response.json()
+        return (data["choices"][0]["message"]["content"] or "").strip()
+
+
+async def enrich_with_image(image_url: str | None) -> tuple[str | None, str | None, str]:
+    """Rehost an image on Cloudinary and describe it. Returns a tuple of
+    (stable_url, public_id, description). Safe to call with None."""
+    if not image_url:
+        return None, None, ""
+    cloud = await upload_to_cloudinary(image_url)
+    stable_url = cloud.get("secure_url") if cloud else None
+    public_id = cloud.get("public_id") if cloud else None
+    # Prefer describing the rehosted URL (guaranteed public, no auth tokens).
+    description = await describe_image(stable_url or image_url)
+    return stable_url, public_id, description
 
 
 # -------------------------------------------------------------------
@@ -171,14 +242,23 @@ async def extract_instagram(url: str) -> dict[str, Any]:
 
     caption = post.get("caption") or ""
     author = post.get("ownerUsername") or post.get("owner", {}).get("username")
-    media = [m for m in [post.get("videoUrl"), post.get("displayUrl")] if m]
+
+    # Reels have a videoUrl + a displayUrl thumbnail; still images have only displayUrl.
+    # VLM describes the still frame, so displayUrl is what we want either way.
+    stable_url, public_id, description = await enrich_with_image(post.get("displayUrl"))
+
+    body_parts = [caption] if caption else []
+    if description:
+        body_parts.append(f"**Visual description:** {description}")
+    body = "\n\n".join(body_parts)
 
     return {
         "platform": "instagram",
         "title": None,
         "author": author,
-        "media_urls": media,
-        "body": caption,
+        "media_urls": [stable_url] if stable_url else [],
+        "public_id": public_id,
+        "body": body,
     }
 
 
@@ -193,17 +273,26 @@ async def extract_tiktok(url: str) -> dict[str, Any]:
         raise RuntimeError("TikTok actor returned zero items (private or blocked?).")
     post = items[0]
 
-    description = post.get("text") or post.get("description") or ""
+    caption = post.get("text") or post.get("description") or ""
     author = (post.get("authorMeta") or {}).get("name") or post.get("author")
-    video_url = post.get("videoUrl") or (post.get("videoMeta") or {}).get("downloadAddr")
-    media = [video_url] if video_url else []
+
+    # Thumbnail / cover frame from the video.
+    meta = post.get("videoMeta") or {}
+    cover_url = meta.get("coverUrl") or post.get("coverUrl") or meta.get("originalCoverUrl")
+    stable_url, public_id, visual_desc = await enrich_with_image(cover_url)
+
+    body_parts = [caption] if caption else []
+    if visual_desc:
+        body_parts.append(f"**Visual description:** {visual_desc}")
+    body = "\n\n".join(body_parts)
 
     return {
         "platform": "tiktok",
         "title": None,
         "author": author,
-        "media_urls": media,
-        "body": description,
+        "media_urls": [stable_url] if stable_url else [],
+        "public_id": public_id,
+        "body": body,
     }
 
 
@@ -257,6 +346,7 @@ async def push_to_rag_anything(markdown: str, url: str, extracted: dict[str, Any
             "platform": extracted.get("platform"),
             "author": extracted.get("author"),
             "media_urls": extracted.get("media_urls", []),
+            "cloudinary_public_id": extracted.get("public_id"),
         },
     }
 
