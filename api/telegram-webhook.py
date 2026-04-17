@@ -105,7 +105,7 @@ async def send_telegram_message(chat_id: int, text: str) -> None:
 async def extract_youtube(url: str) -> dict[str, Any]:
     # Actor input/output schemas vary — check the actor's README on apify.com if
     # the parsing below drops to empty.
-    items = await _run_apify_actor(APIFY_YOUTUBE_ACTOR, {"videoUrls": [url]})
+    items = await _run_apify_actor(APIFY_YOUTUBE_ACTOR, {"videoUrl": url})
     if not items:
         raise RuntimeError("YouTube actor returned zero items (no transcript available?).")
     item = items[0]
