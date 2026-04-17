@@ -20,12 +20,14 @@ from urllib.parse import urlparse
 import httpx
 from apify_client import ApifyClientAsync
 from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
 from youtube_transcript_api import YouTubeTranscriptApi
 
 # -------------------------------------------------------------------
 # Environment
 # -------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+TELEGRAM_WEBHOOK_SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]
 APIFY_API_TOKEN = os.environ["APIFY_API_TOKEN"]
 RAG_ANYTHING_API_URL = os.environ["RAG_ANYTHING_API_URL"]
 RAG_ANYTHING_API_KEY = os.environ.get("RAG_ANYTHING_API_KEY", "")
@@ -249,6 +251,11 @@ async def push_to_rag_anything(markdown: str, url: str, extracted: dict[str, Any
 # -------------------------------------------------------------------
 @app.post("/api/telegram-webhook")
 async def telegram_webhook(request: Request) -> dict[str, bool]:
+    # Reject anything that isn't Telegram — the secret is set via setWebhook
+    # and returned in X-Telegram-Bot-Api-Secret-Token on every delivery.
+    if request.headers.get("x-telegram-bot-api-secret-token") != TELEGRAM_WEBHOOK_SECRET:
+        return JSONResponse({"ok": False}, status_code=401)
+
     update = await request.json()
     message = update.get("message") or update.get("channel_post") or {}
     chat = message.get("chat") or {}
