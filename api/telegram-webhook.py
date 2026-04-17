@@ -26,11 +26,19 @@ from youtube_transcript_api import YouTubeTranscriptApi
 # -------------------------------------------------------------------
 # Environment
 # -------------------------------------------------------------------
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_WEBHOOK_SECRET = os.environ["TELEGRAM_WEBHOOK_SECRET"]
-APIFY_API_TOKEN = os.environ["APIFY_API_TOKEN"]
-RAG_ANYTHING_API_URL = os.environ["RAG_ANYTHING_API_URL"]
-RAG_ANYTHING_API_KEY = os.environ.get("RAG_ANYTHING_API_KEY", "")
+def _env(key: str, default: str | None = None) -> str:
+    """Read an env var and strip whitespace — guards against copy-paste newlines."""
+    value = os.environ.get(key, default)
+    if value is None:
+        raise KeyError(key)
+    return value.strip()
+
+
+TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN")
+TELEGRAM_WEBHOOK_SECRET = _env("TELEGRAM_WEBHOOK_SECRET")
+APIFY_API_TOKEN = _env("APIFY_API_TOKEN")
+RAG_ANYTHING_API_URL = _env("RAG_ANYTHING_API_URL")
+RAG_ANYTHING_API_KEY = _env("RAG_ANYTHING_API_KEY", "")
 
 # Swap these for the specific Apify actor IDs you want to use.
 # Browse https://apify.com/store to pick one that matches your pricing / quality needs.
