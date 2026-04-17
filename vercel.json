@@ -1,11 +1,9 @@
 {
   "functions": {
     "api/telegram-webhook.py": {
+      "runtime": "@vercel/python@4.3.1",
       "memory": 1024,
       "maxDuration": 300
     }
-  },
-  "rewrites": [
-    { "source": "/api/telegram-webhook", "destination": "/api/telegram-webhook" }
-  ]
+  }
 }
