@@ -237,7 +237,7 @@ async def push_to_rag_anything(markdown: str, url: str, extracted: dict[str, Any
     """
     headers = {"Content-Type": "application/json"}
     if RAG_ANYTHING_API_KEY:
-        headers["Authorization"] = f"Bearer {RAG_ANYTHING_API_KEY}"
+        headers["X-API-Key"] = RAG_ANYTHING_API_KEY
 
     payload = {
         "text": markdown,
