@@ -224,13 +224,24 @@ async def extract_jina(url: str) -> dict[str, Any]:
 
 
 async def _run_apify_actor(actor_id: str, run_input: dict[str, Any]) -> list[dict[str, Any]]:
-    client = ApifyClientAsync(APIFY_API_TOKEN)
-    run = await client.actor(actor_id).call(run_input=run_input)
-    if run is None:
-        raise RuntimeError(f"Apify actor {actor_id} returned no run metadata.")
-    dataset_id = run["defaultDatasetId"]
-    items_page = await client.dataset(dataset_id).list_items()
-    return list(items_page.items)
+    # Retry transient connect errors — Vercel Lambda container reuse sometimes
+    # surfaces httpx.ConnectError with OS errno 16 (EBUSY) on the first call of
+    # a thawed container. A short backoff clears it.
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            client = ApifyClientAsync(APIFY_API_TOKEN)
+            run = await client.actor(actor_id).call(run_input=run_input)
+            if run is None:
+                raise RuntimeError(f"Apify actor {actor_id} returned no run metadata.")
+            dataset_id = run["defaultDatasetId"]
+            items_page = await client.dataset(dataset_id).list_items()
+            return list(items_page.items)
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError) as e:
+            last_exc = e
+            print(f"[apify-retry] {actor_id} attempt {attempt + 1}/3 failed: {type(e).__name__}: {e}", flush=True)
+            await asyncio.sleep(0.5 * (attempt + 1))
+    raise last_exc or RuntimeError(f"Apify actor {actor_id} failed after retries.")
 
 
 async def extract_instagram(url: str) -> dict[str, Any]:
