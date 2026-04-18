@@ -410,7 +410,12 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
             f"✅ Success! Parsed {domain} and added it to RAG-Anything. Notes saved.",
         )
     except Exception as exc:  # noqa: BLE001
-        snippet = str(exc)[:300]
+        import traceback
+        # Full stack trace lands in Vercel runtime logs — crucial for diagnosing
+        # errors whose message alone (e.g. bare OSErrors) doesn't reveal the source.
+        print(f"[ragtube-error] URL={url}", flush=True)
+        traceback.print_exc()
+        snippet = f"{type(exc).__name__}: {str(exc)[:260]}"
         await send_telegram_message(chat_id, f"❌ Failed to extract content from {url}: {snippet}")
 
     return {"ok": True}
