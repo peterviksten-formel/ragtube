@@ -382,9 +382,27 @@ async def push_to_rag_anything(markdown: str, url: str, extracted: dict[str, Any
         },
     }
 
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(RAG_ANYTHING_API_URL, json=payload, headers=headers)
-        response.raise_for_status()
+    # Retry on transient network errors and 5xx responses. The tunnel + LightRAG
+    # occasionally have a cold moment (container restart, Mac wake, tunnel
+    # reconnect) — one retry after a short backoff clears nearly all of them.
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(RAG_ANYTHING_API_URL, json=payload, headers=headers)
+            if 500 <= response.status_code < 600:
+                print(f"[rag-retry] {response.status_code} from LightRAG, attempt {attempt + 1}/3", flush=True)
+                await asyncio.sleep(1.5 * (attempt + 1))
+                continue
+            response.raise_for_status()
+            return
+        except (httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError, httpx.ConnectTimeout) as e:
+            last_exc = e
+            print(f"[rag-retry] attempt {attempt + 1}/3 failed: {type(e).__name__}: {e}", flush=True)
+            await asyncio.sleep(1.5 * (attempt + 1))
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"RAG-Anything push failed after retries (last status {response.status_code}).")
 
 
 # -------------------------------------------------------------------
