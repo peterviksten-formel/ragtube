@@ -136,6 +136,41 @@ async def send_telegram_message(chat_id: int, text: str) -> None:
         )
 
 
+async def send_telegram_document(chat_id: int, filename: str, content: str, caption: str) -> None:
+    """Upload extracted markdown back to the user's chat as a file — zero-infra
+    dead-letter queue for posts that couldn't reach LightRAG."""
+    async with httpx.AsyncClient(timeout=30) as client:
+        await client.post(
+            f"{TELEGRAM_API}/sendDocument",
+            data={"chat_id": str(chat_id), "caption": caption[:1000]},
+            files={"document": (filename, content.encode("utf-8"), "text/markdown")},
+        )
+
+
+# httpx exceptions that indicate the remote side is temporarily unreachable —
+# retrying later (via Telegram's webhook redelivery) is likely to succeed.
+_TRANSIENT_HTTPX_EXC = (
+    httpx.ConnectError,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    """True if the error looks transient — tunnel/LightRAG temporarily unreachable."""
+    if isinstance(exc, _TRANSIENT_HTTPX_EXC):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        return 500 <= exc.response.status_code < 600
+    # RuntimeError raised by push_to_rag_anything when retries are exhausted.
+    if isinstance(exc, RuntimeError) and "retries" in str(exc).lower():
+        return True
+    return False
+
+
 # -------------------------------------------------------------------
 # Image helpers: stable storage + vision-model description
 # -------------------------------------------------------------------
@@ -468,23 +503,51 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
     url = canonicalize_url(url)
     domain = (urlparse(url).hostname or "unknown").removeprefix("www.")
 
+    # Extraction phase — no markdown yet, so a failure here has nothing to
+    # preserve. We just tell the user and return 200 so Telegram doesn't retry.
     try:
         extracted = await route_and_extract(url)
         markdown = build_markdown(url, notes, extracted)
-        await push_to_rag_anything(markdown, url, extracted)
-        await send_telegram_message(
-            chat_id,
-            f"✅ Success! Parsed {domain} and added it to RAG-Anything. Notes saved.",
-        )
     except Exception as exc:  # noqa: BLE001
         import traceback
-        # Full stack trace lands in Vercel runtime logs — crucial for diagnosing
-        # errors whose message alone (e.g. bare OSErrors) doesn't reveal the source.
-        print(f"[ragtube-error] URL={url}", flush=True)
+        print(f"[ragtube-error:extract] URL={url}", flush=True)
         traceback.print_exc()
         snippet = f"{type(exc).__name__}: {str(exc)[:260]}"
         await send_telegram_message(chat_id, f"❌ Failed to extract content from {url}: {snippet}")
+        return {"ok": True}
 
+    # Push phase — we have the markdown already. On any failure, save the
+    # markdown to the user's chat as a file so no API-paid work is lost.
+    try:
+        await push_to_rag_anything(markdown, url, extracted)
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+        print(f"[ragtube-error:push] URL={url}", flush=True)
+        traceback.print_exc()
+
+        # Save the extracted markdown back to the user's chat as a file.
+        filename = f"{domain}-{re.sub(r'[^a-zA-Z0-9]', '-', url)[:60]}.md"
+        transient = _is_transient(exc)
+        if transient:
+            caption = f"⚠️ RAG push failed ({type(exc).__name__}). Telegram will retry this webhook. Markdown saved here as a safety copy."
+        else:
+            caption = f"❌ RAG push failed ({type(exc).__name__}: {str(exc)[:120]}). Not retrying. Markdown saved here — re-send the URL once LightRAG is back."
+        try:
+            await send_telegram_document(chat_id, filename, markdown, caption)
+        except Exception:  # noqa: BLE001
+            # If even Telegram file upload fails, fall back to a short text.
+            await send_telegram_message(chat_id, caption[:400])
+
+        if transient:
+            # 500 makes Telegram redeliver. Re-extraction will re-run and re-pay
+            # Apify/Cloudinary/OpenAI, but the user's data is preserved either way.
+            return JSONResponse({"ok": False, "retry": True}, status_code=500)
+        return {"ok": True}
+
+    await send_telegram_message(
+        chat_id,
+        f"✅ Success! Parsed {domain} and added it to RAG-Anything. Notes saved.",
+    )
     return {"ok": True}
 
 
