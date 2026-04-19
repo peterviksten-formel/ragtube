@@ -15,7 +15,7 @@ import asyncio
 import os
 import re
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import httpx
 from apify_client import ApifyClientAsync
@@ -53,6 +53,38 @@ APIFY_YOUTUBE_ACTOR = "pintostudio/youtube-transcript-scraper"
 
 TELEGRAM_API = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}"
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|shorts/|embed/)([a-zA-Z0-9_-]{11})")
+
+# Query params that carry no content identity — strip them so the same URL
+# shared with different tracking tails dedupes to one LightRAG document.
+_TRACKING_PARAMS = {
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    "si", "igsh", "igshid", "feature", "ref", "ref_src", "ref_url",
+    "fbclid", "gclid", "mc_cid", "mc_eid", "yclid", "msclkid",
+    "_branch_match_id", "_branch_referrer",
+}
+
+
+def canonicalize_url(url: str) -> str:
+    """Strip tracking params, normalize host, collapse youtu.be → youtube.com."""
+    try:
+        parts = urlparse(url)
+    except Exception:
+        return url
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    if not host:
+        return url
+    scheme = "https" if parts.scheme in ("http", "https", "") else parts.scheme
+
+    # youtu.be/VIDEO → youtube.com/watch?v=VIDEO (one canonical form).
+    if host == "youtu.be":
+        vid = parts.path.lstrip("/").split("/", 1)[0] if parts.path else ""
+        if vid:
+            return f"https://youtube.com/watch?v={vid}"
+
+    kept = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True) if k.lower() not in _TRACKING_PARAMS]
+    new_query = urlencode(kept)
+    path = parts.path.rstrip("/") if parts.path not in ("", "/") else parts.path
+    return urlunparse((scheme, host, path, parts.params, new_query, ""))
 
 app = FastAPI()
 
@@ -270,8 +302,13 @@ async def extract_instagram(url: str) -> dict[str, Any]:
         elif post.get("displayUrl"):
             source_urls = [post["displayUrl"]]
 
-    # Upload + describe all slides in parallel.
-    enrichments = await asyncio.gather(*[enrich_with_image(u) for u in source_urls])
+    # Upload + describe all slides in parallel. return_exceptions=True so one
+    # bad slide can't nuke the whole carousel — surviving slides still ingest.
+    raw = await asyncio.gather(
+        *[enrich_with_image(u) for u in source_urls],
+        return_exceptions=True,
+    )
+    enrichments = [r for r in raw if isinstance(r, tuple)]
     stable_urls = [e[0] for e in enrichments if e[0]]
     public_ids = [e[1] for e in enrichments if e[1]]
     descriptions = [e[2] for e in enrichments if e[2]]
@@ -428,6 +465,7 @@ async def telegram_webhook(request: Request) -> dict[str, bool]:
         await send_telegram_message(chat_id, "Send me a URL (optionally with notes) and I'll ingest it.")
         return {"ok": True}
 
+    url = canonicalize_url(url)
     domain = (urlparse(url).hostname or "unknown").removeprefix("www.")
 
     try:
