@@ -160,14 +160,13 @@ _TRANSIENT_HTTPX_EXC = (
 
 
 def _is_transient(exc: BaseException) -> bool:
-    """True if the error looks transient — tunnel/LightRAG temporarily unreachable."""
-    if isinstance(exc, _TRANSIENT_HTTPX_EXC):
-        return True
-    if isinstance(exc, httpx.HTTPStatusError):
-        return 500 <= exc.response.status_code < 600
-    # RuntimeError raised by push_to_rag_anything when retries are exhausted.
-    if isinstance(exc, RuntimeError) and "retries" in str(exc).lower():
-        return True
+    """Always False. We used to treat RAG-push failures as transient and return
+    HTTP 500 to Telegram so it would retry the webhook — but that creates
+    runaway loops when a payload is persistently rejected (the inner 3-attempt
+    retry has already given up, then Telegram redelivery re-runs the entire
+    Apify + Cloudinary + OpenAI pipeline at full cost). The markdown is already
+    saved as a file in the chat; if the user wants to retry, they re-send the
+    URL manually."""
     return False
 
 
